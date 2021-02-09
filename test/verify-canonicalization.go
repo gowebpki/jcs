@@ -75,7 +75,7 @@ func verify(fileName string) {
 
 func main() {
 	_, executable, _, _ := runtime.Caller(0)
-	testdata = filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(executable))), "jcs/test/testdata")
+	testdata = filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(executable))), "jcs/testdata")
 	fmt.Println(testdata)
 	files, err := ioutil.ReadDir(filepath.Join(testdata, "input"))
 	check(err)
