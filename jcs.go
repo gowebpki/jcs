@@ -22,6 +22,13 @@ type nameValueType struct {
 	value   string
 }
 
+type jcsData struct {
+	// JSON data MUST be UTF-8 encoded
+	jsonData []byte
+	// Current pointer in jsonData
+	index int
+}
+
 // JSON standard escapes (modulo \u)
 var asciiEscapes = []byte{'\\', '"', 'b', 'f', 'n', 'r', 't'}
 var binaryEscapes = []byte{'\\', '"', '\b', '\f', '\n', '\r', '\t'}
@@ -31,51 +38,54 @@ var literals = []string{"true", "false", "null"}
 
 // Transform converts raw JSON data from a []byte array into a canonicalized version according RFC 8785
 func Transform(jsonData []byte) ([]byte, error) {
-	// JSON data MUST be UTF-8 encoded
-	// Current pointer in jsonData
-	var index int
+	if jsonData == nil {
+		return nil, errors.New("No JSON data provided")
+	}
 
-	//TODO: replace this with parse element which keeps current functionality for parse array and object
-	//but adds parsing of simple types and strings
-	transformed, err := parseElement(jsonData, &index)
+	// Create a JCS Data struct to store the JSON Data and the index.
+	var jd jcsData
+	jd.jsonData = jsonData
+	j := &jd
+
+	transformed, err := j.parseElement()
 	if err != nil {
 		return nil, err
 	}
 
-	for index < len(jsonData) {
-		if !isWhiteSpace(jsonData[index]) {
+	for j.index < len(j.jsonData) {
+		if !j.isWhiteSpace(j.jsonData[j.index]) {
 			return nil, errors.New("Improperly terminated JSON object")
 		}
-		index++
+		j.index++
 	}
 	return []byte(transformed), err
 }
 
-func isWhiteSpace(c byte) bool {
+func (j *jcsData) isWhiteSpace(c byte) bool {
 	return c == 0x20 || c == 0x0a || c == 0x0d || c == 0x09
 }
 
-func nextChar(jsonData []byte, index *int) (byte, error) {
-	if *index < len(jsonData) {
-		c := jsonData[*index]
+func (j *jcsData) nextChar() (byte, error) {
+	if j.index < len(j.jsonData) {
+		c := j.jsonData[j.index]
 		if c > 0x7f {
 			return 0, errors.New("Unexpected non-ASCII character")
 		}
-		*index++
+		j.index++
 		return c, nil
 	}
 	return 0, errors.New("Unexpected EOF reached")
 }
 
 //scan advances index on jsonData to the first non whitespace character and returns it.
-func scan(jsonData []byte, index *int) (byte, error) {
+func (j *jcsData) scan() (byte, error) {
 	for {
-		c, err := nextChar(jsonData, index)
+		c, err := j.nextChar()
 		if err != nil {
 			return 0, err
 		}
 
-		if isWhiteSpace(c) {
+		if j.isWhiteSpace(c) {
 			continue
 		}
 
@@ -83,8 +93,8 @@ func scan(jsonData []byte, index *int) (byte, error) {
 	}
 }
 
-func scanFor(jsonData []byte, index *int, expected byte) error {
-	c, err := scan(jsonData, index)
+func (j *jcsData) scanFor(expected byte) error {
+	c, err := j.scan()
 	if err != nil {
 		return err
 	}
@@ -94,23 +104,23 @@ func scanFor(jsonData []byte, index *int, expected byte) error {
 	return nil
 }
 
-func getUEscape(jsonData []byte, index *int) (rune, error) {
-	start := *index
+func (j *jcsData) getUEscape() (rune, error) {
+	start := j.index
 	for i := 0; i < 4; i++ {
-		_, err := nextChar(jsonData, index)
+		_, err := j.nextChar()
 		if err != nil {
 			return 0, err
 		}
 	}
 
-	u16, err := strconv.ParseUint(string(jsonData[start:*index]), 16, 64)
+	u16, err := strconv.ParseUint(string(j.jsonData[start:j.index]), 16, 64)
 	if err != nil {
 		return 0, err
 	}
 	return rune(u16), nil
 }
 
-func decorateString(rawUTF8 string) string {
+func (j *jcsData) decorateString(rawUTF8 string) string {
 	var quotedString strings.Builder
 	quotedString.WriteByte('"')
 
@@ -137,15 +147,15 @@ CoreLoop:
 	return quotedString.String()
 }
 
-func parseQuotedString(jsonData []byte, index *int) (string, error) {
+func (j *jcsData) parseQuotedString() (string, error) {
 	var rawString strings.Builder
 
 CoreLoop:
 	for {
 		var c byte
-		if *index < len(jsonData) {
-			c = jsonData[*index]
-			*index++
+		if j.index < len(j.jsonData) {
+			c = j.jsonData[j.index]
+			j.index++
 		} else {
 			return "", errors.New("Unexpected EOF reached")
 		}
@@ -158,14 +168,14 @@ CoreLoop:
 			return "", errors.New("Unterminated string literal")
 		} else if c == '\\' {
 			// Escape sequence
-			c, err := nextChar(jsonData, index)
+			c, err := j.nextChar()
 			if err != nil {
 				return "", err
 			}
 
 			if c == 'u' {
 				// The \u escape
-				firstUTF16, err := getUEscape(jsonData, index)
+				firstUTF16, err := j.getUEscape()
 				if err != nil {
 					return "", err
 				}
@@ -173,11 +183,11 @@ CoreLoop:
 				if utf16.IsSurrogate(firstUTF16) {
 					// If the first UTF-16 code unit has a certain value there must be
 					// another succeeding UTF-16 code unit as well
-					backslash, err := nextChar(jsonData, index)
+					backslash, err := j.nextChar()
 					if err != nil {
 						return "", err
 					}
-					u, err := nextChar(jsonData, index)
+					u, err := j.nextChar()
 					if err != nil {
 						return "", err
 					}
@@ -187,7 +197,7 @@ CoreLoop:
 					}
 
 					// Output the UTF-32 code point as UTF-8
-					uEscape, err := getUEscape(jsonData, index)
+					uEscape, err := j.getUEscape()
 					if err != nil {
 						return "", err
 					}
@@ -223,21 +233,21 @@ CoreLoop:
 	return rawString.String(), nil
 }
 
-func parseSimpleType(jsonData []byte, index *int) (string, error) {
+func (j *jcsData) parseSimpleType() (string, error) {
 	var token strings.Builder
 
-	*index--
+	j.index--
 	//no condition is needed here.
 	//if the buffer reaches EOF scan returns an error, or we terminate because the
 	//json simple type terminates
 	for {
-		c, err := scan(jsonData, index)
+		c, err := j.scan()
 		if err != nil {
 			return "", err
 		}
 
 		if c == ',' || c == ']' || c == '}' {
-			*index--
+			j.index--
 			break
 		}
 
@@ -270,57 +280,57 @@ func parseSimpleType(jsonData []byte, index *int) (string, error) {
 	return value, nil
 }
 
-func parseElement(jsonData []byte, index *int) (string, error) {
-	c, err := scan(jsonData, index)
+func (j *jcsData) parseElement() (string, error) {
+	c, err := j.scan()
 	if err != nil {
 		return "", err
 	}
 
 	switch c {
 	case '{':
-		return parseObject(jsonData, index)
+		return j.parseObject()
 	case '"':
-		str, err := parseQuotedString(jsonData, index)
+		str, err := j.parseQuotedString()
 		if err != nil {
 			return "", err
 		}
-		return decorateString(str), nil
+		return j.decorateString(str), nil
 	case '[':
-		return parseArray(jsonData, index)
+		return j.parseArray()
 	default:
-		return parseSimpleType(jsonData, index)
+		return j.parseSimpleType()
 	}
 }
 
-func peek(jsonData []byte, index *int) (byte, error) {
-	c, err := scan(jsonData, index)
+func (j *jcsData) peek() (byte, error) {
+	c, err := j.scan()
 	if err != nil {
 		return 0, err
 	}
 
-	*index--
+	j.index--
 	return c, nil
 }
 
-func parseArray(jsonData []byte, index *int) (string, error) {
+func (j *jcsData) parseArray() (string, error) {
 	var arrayData strings.Builder
 	var next bool
 
 	arrayData.WriteByte('[')
 
 	for {
-		c, err := peek(jsonData, index)
+		c, err := j.peek()
 		if err != nil {
 			return "", err
 		}
 
 		if c == ']' {
-			*index++
+			j.index++
 			break
 		}
 
 		if next {
-			err = scanFor(jsonData, index, ',')
+			err = j.scanFor(',')
 			if err != nil {
 				return "", err
 			}
@@ -329,7 +339,7 @@ func parseArray(jsonData []byte, index *int) (string, error) {
 			next = true
 		}
 
-		element, err := parseElement(jsonData, index)
+		element, err := j.parseElement()
 		if err != nil {
 			return "", err
 		}
@@ -340,7 +350,7 @@ func parseArray(jsonData []byte, index *int) (string, error) {
 	return arrayData.String(), nil
 }
 
-func lexicographicallyPrecedes(sortKey []uint16, e *list.Element) (bool, error) {
+func (j *jcsData) lexicographicallyPrecedes(sortKey []uint16, e *list.Element) (bool, error) {
 	// Find the minimum length of the sortKeys
 	oldSortKey := e.Value.(nameValueType).sortKey
 	minLength := len(oldSortKey)
@@ -370,35 +380,35 @@ func lexicographicallyPrecedes(sortKey []uint16, e *list.Element) (bool, error) 
 	return false, nil
 }
 
-func parseObject(jsonData []byte, index *int) (string, error) {
+func (j *jcsData) parseObject() (string, error) {
 	nameValueList := list.New()
 	var next bool = false
 CoreLoop:
 	for {
-		c, err := peek(jsonData, index)
+		c, err := j.peek()
 		if err != nil {
 			return "", err
 		}
 
 		if c == '}' {
 			//advance index because of peeked '}'
-			*index++
+			j.index++
 			break
 		}
 
 		if next {
-			err = scanFor(jsonData, index, ',')
+			err = j.scanFor(',')
 			if err != nil {
 				return "", err
 			}
 		}
 		next = true
 
-		err = scanFor(jsonData, index, '"')
+		err = j.scanFor('"')
 		if err != nil {
 			return "", err
 		}
-		rawUTF8, err := parseQuotedString(jsonData, index)
+		rawUTF8, err := j.parseQuotedString()
 		if err != nil {
 			break
 		}
@@ -406,19 +416,19 @@ CoreLoop:
 		// Since UTF-8 doesn't have endianess this is just a value transformation
 		// In the Go case the transformation is UTF-8 => UTF-32 => UTF-16
 		sortKey := utf16.Encode([]rune(rawUTF8))
-		err = scanFor(jsonData, index, ':')
+		err = j.scanFor(':')
 		if err != nil {
 			return "", err
 		}
 
-		element, err := parseElement(jsonData, index)
+		element, err := j.parseElement()
 		if err != nil {
 			return "", err
 		}
 		nameValue := nameValueType{rawUTF8, sortKey, element}
 		for e := nameValueList.Front(); e != nil; e = e.Next() {
 			// Check if the key is smaller than a previous key
-			if precedes, err := lexicographicallyPrecedes(sortKey, e); err != nil {
+			if precedes, err := j.lexicographicallyPrecedes(sortKey, e); err != nil {
 				return "", err
 			} else if precedes {
 				// Precedes => Insert before and exit sorting
@@ -442,7 +452,7 @@ CoreLoop:
 		}
 		next = true
 		nameValue := e.Value.(nameValueType)
-		objectData.WriteString(decorateString(nameValue.name))
+		objectData.WriteString(j.decorateString(nameValue.name))
 		objectData.WriteByte(':')
 		objectData.WriteString(nameValue.value)
 	}
