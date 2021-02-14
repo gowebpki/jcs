@@ -14,7 +14,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/beeemT/Packages/fileutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -70,9 +69,7 @@ func TestNumberToJSON(t *testing.T) {
 		},
 	}
 
-	exists, err := fileutil.Exists(testFile)
-	r.NoErrorf(err, "Failed at testing if numbers test file exists: %s\n", err)
-	if exists {
+	if _, err := os.Stat(testFile); err == nil {
 		file, err := os.Open(testFile)
 		r.NoErrorf(err, "Failed at reading test sample file: %s\n", err)
 
@@ -96,7 +93,9 @@ func TestNumberToJSON(t *testing.T) {
 		}
 		r.NoErrorf(err, "Failed at scanning test file: %s\n", err)
 		file.Close()
-
+	} else if os.IsNotExist(err) {
+	} else {
+		r.NoErrorf(err, "Failed at testing if numbers test file exists: %s\n", err)
 	}
 
 	for _, tC := range testCases {
