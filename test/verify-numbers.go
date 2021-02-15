@@ -56,9 +56,9 @@ func verify(ieeeHex string, expected string) {
 			panic("Missing error")
 		}
 		return
-	} else {
-		check(err)
 	}
+	check(err)
+
 	if es6Created != expected {
 		conversionErrors++
 		fmt.Println("\n" + ieeeHex)
