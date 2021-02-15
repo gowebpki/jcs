@@ -3,7 +3,7 @@
 # JSON Canonicalization
 
 [![Go Report Card](https://goreportcard.com/badge/github.com/gowebpki/jcs)](https://goreportcard.com/report/github.com/gowebpki/jcs) 
-[![godoc](http://img.shields.io/badge/godoc-jwt_package-blue.svg?style=flat)](https://pkg.go.dev/github.com/gowebpki/jcs)
+[![godoc](https://img.shields.io/badge/godoc-version_1-blue.svg?style=flat)](https://pkg.go.dev/github.com/gowebpki/jcs)
 [![license](http://img.shields.io/badge/license-apache_2.0-blue.svg?style=flat)](https://raw.githubusercontent.com/gowebpki/jcs/master/LICENSE)
 
 Cryptographic operations like hashing and signing depend on that the target 
