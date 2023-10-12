@@ -9,7 +9,7 @@ package jcs
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -31,16 +31,34 @@ func errorOccurred(activity string, err error) string {
 }
 
 func doesNotMatchExpected(expectedField, expectedValue, actualField, actualValue string) string {
-	return failedBecause(fmt.Sprintf("%s [%s] does not match expected %s [%s]\n", actualField, actualValue, expectedField, expectedValue))
+	return failedBecause(
+		fmt.Sprintf(
+			"%s [%s] does not match expected %s [%s]\n",
+			actualField,
+			actualValue,
+			expectedField,
+			expectedValue,
+		),
+	)
 }
 
 func TestTransform(t *testing.T) {
-	r := require.New(t)
-
 	testCases := []struct {
 		desc     string
 		filename string
 	}{
+		{
+			desc:     "Null",
+			filename: "null.json",
+		},
+		{
+			desc:     "True",
+			filename: "true.json",
+		},
+		{
+			desc:     "False",
+			filename: "false.json",
+		},
 		{
 			desc:     "Arrays",
 			filename: "arrays.json",
@@ -72,11 +90,15 @@ func TestTransform(t *testing.T) {
 	}
 	for _, tC := range testCases {
 		t.Run(tC.desc, func(t *testing.T) {
-			input, err := ioutil.ReadFile(filepath.Join(pathTestData,
+			tC := tC
+			t.Parallel()
+			r := require.New(t)
+
+			input, err := os.ReadFile(filepath.Join(pathTestData,
 				pathInputRelativeToTestData, tC.filename))
 			r.NoError(err, errorOccurred("reading test input json", err))
 
-			output, err := ioutil.ReadFile(filepath.Join(pathTestData,
+			output, err := os.ReadFile(filepath.Join(pathTestData,
 				pathOutputRelativeToTestData, tC.filename))
 			r.NoError(err, errorOccurred("reading expected transformed output sample", err))
 
@@ -86,8 +108,24 @@ func TestTransform(t *testing.T) {
 			twiceTransformed, err := Transform(input)
 			r.NoError(err, errorOccurred("transforming transformed input", err))
 
-			r.True(bytes.Equal(transformed, output), doesNotMatchExpected("JSON", string(output), "transformed JSON", string(transformed)))
-			r.True(bytes.Equal(twiceTransformed, transformed), doesNotMatchExpected("transformed JSON", string(transformed), "twice transformed JSON", string(twiceTransformed)))
+			r.True(
+				bytes.Equal(transformed, output),
+				doesNotMatchExpected(
+					"JSON",
+					string(output),
+					"transformed JSON",
+					string(transformed),
+				),
+			)
+			r.True(
+				bytes.Equal(twiceTransformed, transformed),
+				doesNotMatchExpected(
+					"transformed JSON",
+					string(transformed),
+					"twice transformed JSON",
+					string(twiceTransformed),
+				),
+			)
 		})
 	}
 }
