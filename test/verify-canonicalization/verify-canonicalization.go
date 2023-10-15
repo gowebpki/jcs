@@ -51,9 +51,9 @@ func verify(fileName string) {
 	recycled, err2 := jcs.Transform(actual)
 	check(err2)
 	expected := read(fileName, "output")
-	var utf8InHex = "\nFile: " + fileName
-	var byteCount = 0
-	var next = false
+	utf8InHex := "\nFile: " + fileName
+	byteCount := 0
+	next := false
 	for _, b := range actual {
 		if byteCount%32 == 0 {
 			utf8InHex = utf8InHex + "\n"
@@ -83,7 +83,7 @@ func main() {
 		verify(file.Name())
 	}
 	if failures == 0 {
-		fmt.Println("All tests succeeded!\n")
+		fmt.Println("All tests succeeded!")
 	} else {
 		fmt.Printf("\n****** ERRORS: %d *******\n", failures)
 	}
