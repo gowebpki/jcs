@@ -271,3 +271,71 @@ func TestTransformRejectsInvalidSurrogatePairs(t *testing.T) {
 	r.NoError(err, errorOccurred("transforming a valid high+low surrogate pair", err))
 	r.Equal("[\"\U0001F600\"]", string(transformed), "a valid surrogate pair should decode to the corresponding rune")
 }
+
+// TestTransformRejectsMalformedNumbersAndLiterals guards against a
+// regression where parseSimpleType read token bytes with scan(), which
+// silently skips whitespace, and handed the assembled token to
+// strconv.ParseFloat, which accepts a far wider grammar than RFC 8259 §6
+// (hexadecimal floats, a leading '+', leading zeros, a bare '.', and
+// interior whitespace stripped out of the token entirely). That let
+// ill-formed inputs such as "[0x1p5]", "[+1]", "[01]", "[.5]", "[1.]",
+// "[1 2 3]", "[1 . 5 e 1]", "[tr ue]", and "[nu ll]" canonicalize
+// successfully to "[32]", "[1]", "[1]", "[0.5]", "[1]", "[123]", "[15]",
+// "[true]", and "[null]" respectively, all of which encoding/json and every
+// RFC 8259-conforming parser reject outright.
+func TestTransformRejectsMalformedNumbersAndLiterals(t *testing.T) {
+	testCases := []struct {
+		desc  string
+		input string
+	}{
+		{desc: "HexFloat", input: `[0x1p5]`},
+		{desc: "LeadingPlus", input: `[+1]`},
+		{desc: "LeadingZero", input: `[01]`},
+		{desc: "BareLeadingDot", input: `[.5]`},
+		{desc: "BareTrailingDot", input: `[1.]`},
+		{desc: "WhitespaceSplitDigits", input: `[1 2 3]`},
+		{desc: "WhitespaceSplitFloat", input: `[1 . 5 e 1]`},
+		{desc: "WhitespaceSplitTrueLiteral", input: `[tr ue]`},
+		{desc: "WhitespaceSplitNullLiteral", input: `[nu ll]`},
+	}
+
+	for _, tC := range testCases {
+		tC := tC
+		t.Run(tC.desc, func(t *testing.T) {
+			t.Parallel()
+			r := require.New(t)
+
+			_, err := Transform([]byte(tC.input))
+			r.Error(err, "Transform should reject a malformed number or literal instead of accepting a wider grammar than RFC 8259")
+		})
+	}
+
+	// Well-formed numbers and literals, including edge cases the grammar
+	// must still accept, must continue to transform normally.
+	validCases := []struct {
+		desc     string
+		input    string
+		expected string
+	}{
+		{desc: "Zero", input: `[0]`, expected: `[0]`},
+		{desc: "NegativeZero", input: `[-0]`, expected: `[0]`},
+		{desc: "NegativeInteger", input: `[-123]`, expected: `[-123]`},
+		{desc: "SimpleFraction", input: `[1.5]`, expected: `[1.5]`},
+		{desc: "PositiveExponent", input: `[1.5e+10]`, expected: `[15000000000]`},
+		{desc: "NegativeExponent", input: `[1.5E-1]`, expected: `[0.15]`},
+		{desc: "TrueLiteral", input: `[true]`, expected: `[true]`},
+		{desc: "NullLiteral", input: `[null]`, expected: `[null]`},
+	}
+
+	for _, tC := range validCases {
+		tC := tC
+		t.Run(tC.desc, func(t *testing.T) {
+			t.Parallel()
+			r := require.New(t)
+
+			transformed, err := Transform([]byte(tC.input))
+			r.NoError(err, errorOccurred(fmt.Sprintf("transforming %q", tC.input), err))
+			r.Equal(tC.expected, string(transformed))
+		})
+	}
+}

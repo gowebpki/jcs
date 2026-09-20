@@ -11,6 +11,7 @@ import (
 	"container/list"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode/utf16"
@@ -297,15 +298,21 @@ func (j *jcsData) parseSimpleType() (string, error) {
 	j.index--
 
 	// no condition is needed here.
-	// if the buffer reaches EOF scan returns an error, or we terminate because the
+	// if the buffer reaches EOF nextChar returns an error, or we terminate because the
 	// json simple type terminates
 	for {
-		c, err := j.scan()
+		c, err := j.nextChar()
 		if err != nil {
 			return "", err
 		}
 
-		if c == ',' || c == ']' || c == '}' {
+		// A literal or number is terminated by a structural character or by
+		// whitespace. Using nextChar (rather than scan, which silently skips
+		// whitespace) and stopping on whitespace here means interior spaces,
+		// tabs, or newlines are never stripped out of the middle of a token:
+		// "1 2 3" and "tr ue" are left as ill-formed instead of collapsing
+		// into "123" and "true".
+		if c == ',' || c == ']' || c == '}' || j.isWhiteSpace(c) {
 			j.index--
 			break
 		}
@@ -320,6 +327,19 @@ func (j *jcsData) parseSimpleType() (string, error) {
 	return parseLiteral(token.String())
 }
 
+// numberPattern is the RFC 8259 §6 number grammar:
+//
+//	number = [ "-" ] int [ frac ] [ exp ]
+//	int    = "0" / ( digit1-9 *DIGIT )
+//	frac   = "." 1*DIGIT
+//	exp    = ("e" / "E") [ "-" / "+" ] 1*DIGIT
+//
+// strconv.ParseFloat accepts a considerably wider grammar than this (hex
+// floating-point literals, a leading '+', leading zeros, digit-separator
+// underscores, and a bare leading or trailing '.'), so a token must match
+// this pattern before it is handed to ParseFloat.
+var numberPattern = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$`)
+
 func parseLiteral(value string) (string, error) {
 	// Is it a JSON literal?
 	for _, literal := range literals {
@@ -328,7 +348,13 @@ func parseLiteral(value string) (string, error) {
 		}
 	}
 
-	// Apparently not so we assume that it is a I-JSON number
+	// Apparently not a literal, so we assume that it is a I-JSON number.
+	// Reject anything that is not a well-formed JSON number (and is not one
+	// of the known literals either) before consulting strconv.ParseFloat.
+	if !numberPattern.MatchString(value) {
+		return "", fmt.Errorf("Invalid literal or number: %s", value)
+	}
+
 	ieeeF64, err := strconv.ParseFloat(value, 64)
 	if err != nil {
 		return "", err
