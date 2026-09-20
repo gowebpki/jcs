@@ -459,7 +459,7 @@ CoreLoop:
 		}
 		rawUTF8, err := j.parseQuotedString()
 		if err != nil {
-			break
+			return "", err
 		}
 		// Sort keys on UTF-16 code units
 		// Since UTF-8 doesn't have endianess this is just a value transformation

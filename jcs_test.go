@@ -181,3 +181,54 @@ func TestTransformRejectsExcessiveNesting(t *testing.T) {
 	_, err := Transform(payload)
 	r.NoError(err, errorOccurred("transforming an array nested just within maxNestingDepth", err))
 }
+
+// TestTransformRejectsMalformedObjectKey guards against a regression where
+// parseObject swallowed an error from parsing a property name (truncated
+// input, a raw control character, or an invalid escape inside the key) by
+// breaking out of its parsing loop instead of propagating the error. That bug
+// let Transform silently serialize whatever name/value pairs it had already
+// collected and return them with a nil error, so a truncated or corrupted
+// object such as {"amount":100,"recipient was canonicalized to {"amount":100}
+// with no indication that trailing members were dropped.
+func TestTransformRejectsMalformedObjectKey(t *testing.T) {
+	testCases := []struct {
+		desc  string
+		input []byte
+	}{
+		{
+			desc:  "TruncatedMidKey",
+			input: []byte(`{"amount":100,"recipient`),
+		},
+		{
+			desc:  "TruncatedRightAfterOpeningKeyQuote",
+			input: []byte(`{"amount":100,"`),
+		},
+		{
+			desc:  "ControlCharacterInKeyThenEOF",
+			input: append([]byte(`{"amount":100,"x`), 0x01),
+		},
+		{
+			desc:  "BadEscapeInKeyThenEOF",
+			input: []byte(`{"amount":100,"x\q`),
+		},
+		{
+			desc:  "MinimalTruncatedKey",
+			input: []byte(`{"`),
+		},
+		{
+			desc:  "ControlCharacterInKeyThenTrailingWhitespace",
+			input: append(append([]byte(`{"amount":100,"x`), 0x0A), []byte("   ")...),
+		},
+	}
+
+	for _, tC := range testCases {
+		tC := tC
+		t.Run(tC.desc, func(t *testing.T) {
+			t.Parallel()
+			r := require.New(t)
+
+			_, err := Transform(tC.input)
+			r.Error(err, "Transform should reject an object with a malformed or truncated key instead of silently dropping trailing members")
+		})
+	}
+}
