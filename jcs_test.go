@@ -129,3 +129,55 @@ func TestTransform(t *testing.T) {
 		})
 	}
 }
+
+// TestTransformRejectsExcessiveNesting guards against a regression of the
+// unbounded recursion denial of service, where a deeply nested JSON payload
+// (for example a long run of '[' characters) grows the recursive descent
+// parser's call stack until the Go runtime aborts the whole process with a
+// fatal, unrecoverable stack overflow. Transform must instead return an
+// ordinary error once the nesting depth exceeds maxNestingDepth.
+func TestTransformRejectsExcessiveNesting(t *testing.T) {
+	r := require.New(t)
+
+	testCases := []struct {
+		desc string
+		open byte
+		shut byte
+	}{
+		{desc: "Arrays", open: '[', shut: ']'},
+		{desc: "Objects", open: '{', shut: '}'},
+	}
+
+	for _, tC := range testCases {
+		tC := tC
+		t.Run(tC.desc, func(t *testing.T) {
+			t.Parallel()
+			r := require.New(t)
+
+			depth := maxNestingDepth + 1
+			payload := make([]byte, 0, depth*2)
+			for i := 0; i < depth; i++ {
+				payload = append(payload, tC.open)
+			}
+			for i := 0; i < depth; i++ {
+				payload = append(payload, tC.shut)
+			}
+
+			_, err := Transform(payload)
+			r.Error(err, "Transform should reject a payload nested deeper than maxNestingDepth")
+		})
+	}
+
+	// A payload nested just within the bound must still transform normally,
+	// confirming that legitimate, deeply structured documents are unaffected.
+	within := maxNestingDepth - 1
+	payload := make([]byte, 0, within*2)
+	for i := 0; i < within; i++ {
+		payload = append(payload, '[')
+	}
+	for i := 0; i < within; i++ {
+		payload = append(payload, ']')
+	}
+	_, err := Transform(payload)
+	r.NoError(err, errorOccurred("transforming an array nested just within maxNestingDepth", err))
+}

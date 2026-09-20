@@ -27,7 +27,16 @@ type jcsData struct {
 	jsonData []byte
 	// Current pointer in jsonData
 	index int
+	// Current nesting depth of arrays and objects
+	depth int
 }
+
+// maxNestingDepth bounds the recursion depth of parseElement, parseArray, and
+// parseObject. Without a bound, a payload consisting of many nested arrays or
+// objects (for example a long run of '[' characters) grows the goroutine call
+// stack until the Go runtime aborts the process with a fatal, unrecoverable
+// stack overflow. The value matches the nesting limit used by encoding/json.
+const maxNestingDepth = 10000
 
 // JSON standard escapes (modulo \u)
 var (
@@ -341,6 +350,12 @@ func (j *jcsData) peek() (byte, error) {
 }
 
 func (j *jcsData) parseArray() (string, error) {
+	j.depth++
+	defer func() { j.depth-- }()
+	if j.depth > maxNestingDepth {
+		return "", fmt.Errorf("Maximum nesting depth of %d exceeded", maxNestingDepth)
+	}
+
 	var arrayData strings.Builder
 	var next bool
 
@@ -409,6 +424,12 @@ func (j *jcsData) lexicographicallyPrecedes(sortKey []uint16, e *list.Element) (
 }
 
 func (j *jcsData) parseObject() (string, error) {
+	j.depth++
+	defer func() { j.depth-- }()
+	if j.depth > maxNestingDepth {
+		return "", fmt.Errorf("Maximum nesting depth of %d exceeded", maxNestingDepth)
+	}
+
 	nameValueList := list.New()
 	var next bool = false
 CoreLoop:
