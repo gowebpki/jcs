@@ -8,10 +8,10 @@
 package jcs
 
 import (
-	"container/list"
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf16"
@@ -444,34 +444,27 @@ func (j *jcsData) parseArray() (string, error) {
 	return arrayData.String(), nil
 }
 
-func (j *jcsData) lexicographicallyPrecedes(sortKey []uint16, e *list.Element) (bool, error) {
-	// Find the minimum length of the sortKeys
-	oldSortKey := e.Value.(nameValueType).sortKey
-	minLength := len(oldSortKey)
-	if minLength > len(sortKey) {
-		minLength = len(sortKey)
+// compareSortKeys lexicographically compares two UTF-16 sort keys, returning
+// a negative number if a precedes b, zero if they are equal, and a positive
+// number if a succeeds b. It is used to sort object members once, in
+// O(n log n), rather than the earlier approach of scanning a linked list from
+// the front for every new member, which was O(n) per insertion (O(n^2)
+// overall) and let an object with many keys already in ascending order (a
+// trivially attacker-chosen input) burn CPU quadratically in the number of
+// members.
+func compareSortKeys(a, b []uint16) int {
+	minLength := len(a)
+	if minLength > len(b) {
+		minLength = len(b)
 	}
 	for q := 0; q < minLength; q++ {
-		diff := int(sortKey[q]) - int(oldSortKey[q])
-		if diff < 0 {
-			// Smaller => Precedes
-			return true, nil
-		} else if diff > 0 {
-			// Bigger => No match
-			return false, nil
+		diff := int(a[q]) - int(b[q])
+		if diff != 0 {
+			return diff
 		}
-		// Still equal => Continue
 	}
-	// The sortKeys compared equal up to minLength
-	if len(sortKey) < len(oldSortKey) {
-		// Shorter => Precedes
-		return true, nil
-	}
-	if len(sortKey) == len(oldSortKey) {
-		return false, fmt.Errorf("Duplicate key: %s", e.Value.(nameValueType).name)
-	}
-	// Longer => No match
-	return false, nil
+	// Equal up to minLength, so the shorter key precedes the longer one.
+	return len(a) - len(b)
 }
 
 func (j *jcsData) parseObject() (string, error) {
@@ -481,9 +474,8 @@ func (j *jcsData) parseObject() (string, error) {
 		return "", fmt.Errorf("Maximum nesting depth of %d exceeded", maxNestingDepth)
 	}
 
-	nameValueList := list.New()
+	var nameValues []nameValueType
 	var next bool = false
-CoreLoop:
 	for {
 		c, err := j.peek()
 		if err != nil {
@@ -525,33 +517,32 @@ CoreLoop:
 		if err != nil {
 			return "", err
 		}
-		nameValue := nameValueType{rawUTF8, sortKey, element}
-		for e := nameValueList.Front(); e != nil; e = e.Next() {
-			// Check if the key is smaller than a previous key
-			if precedes, err := j.lexicographicallyPrecedes(sortKey, e); err != nil {
-				return "", err
-			} else if precedes {
-				// Precedes => Insert before and exit sorting
-				nameValueList.InsertBefore(nameValue, e)
-				continue CoreLoop
-			}
-			// Continue searching for a possibly succeeding sortKey
-			// (which is straightforward since the list is ordered)
+		nameValues = append(nameValues, nameValueType{rawUTF8, sortKey, element})
+	}
+
+	// Sort all members once, in O(n log n), rather than maintaining sorted
+	// order incrementally as each member is parsed.
+	sort.Slice(nameValues, func(i, k int) bool {
+		return compareSortKeys(nameValues[i].sortKey, nameValues[k].sortKey) < 0
+	})
+
+	// A duplicate key sorts adjacent to itself, so a single linear pass over
+	// the now-sorted members is enough to detect it.
+	for i := 1; i < len(nameValues); i++ {
+		if compareSortKeys(nameValues[i-1].sortKey, nameValues[i].sortKey) == 0 {
+			return "", fmt.Errorf("Duplicate key: %s", nameValues[i].name)
 		}
-		// The sortKey is either the first or is succeeding all previous sortKeys
-		nameValueList.PushBack(nameValue)
 	}
 
 	// Now everything is sorted so we can properly serialize the object
 	var objectData strings.Builder
 	objectData.WriteByte('{')
 	next = false
-	for e := nameValueList.Front(); e != nil; e = e.Next() {
+	for _, nameValue := range nameValues {
 		if next {
 			objectData.WriteByte(',')
 		}
 		next = true
-		nameValue := e.Value.(nameValueType)
 		objectData.WriteString(j.decorateString(nameValue.name))
 		objectData.WriteByte(':')
 		objectData.WriteString(nameValue.value)

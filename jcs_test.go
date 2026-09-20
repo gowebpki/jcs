@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -338,4 +339,62 @@ func TestTransformRejectsMalformedNumbersAndLiterals(t *testing.T) {
 			r.Equal(tC.expected, string(transformed))
 		})
 	}
+}
+
+// TestTransformSortsAndDetectsDuplicateObjectKeys checks that object members
+// are still correctly sorted into ascending UTF-16 code unit order, and that
+// a duplicate key is still detected and rejected, now that parseObject sorts
+// members once with sort.Slice instead of maintaining sorted order through
+// repeated linked-list insertion.
+func TestTransformSortsAndDetectsDuplicateObjectKeys(t *testing.T) {
+	r := require.New(t)
+
+	transformed, err := Transform([]byte(`{"c":3,"a":1,"b":2}`))
+	r.NoError(err, errorOccurred("transforming an object with out-of-order keys", err))
+	r.Equal(`{"a":1,"b":2,"c":3}`, string(transformed))
+
+	_, err = Transform([]byte(`{"a":1,"a":2}`))
+	r.Error(err, "Transform should reject an object with a duplicate key")
+}
+
+// TestTransformObjectSortIsNotQuadratic guards against a regression of the
+// O(n^2) linked-list insertion sort in parseObject, where keys arriving in
+// ascending order (a trivially attacker-chosen input) made every new member
+// walk the entire list of previously seen members before being appended. A
+// single object with many pre-sorted keys therefore took time quadratic in
+// the number of members: the reported measurements showed roughly 4x the
+// wall-clock time for each doubling of key count, with a 40,000-key, ~560 KB
+// object taking around 7.5 seconds of CPU. Sorting once with sort.Slice
+// after collecting all members is O(n log n), so a comparably sized object
+// should complete in a small fraction of that time.
+func TestTransformObjectSortIsNotQuadratic(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping performance regression test in -short mode")
+	}
+	r := require.New(t)
+
+	const keyCount = 50000
+	var b bytes.Buffer
+	b.WriteByte('{')
+	for i := 0; i < keyCount; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		// Ascending order is the worst case for the old linked-list
+		// insertion sort, and is trivially chosen by an attacker.
+		fmt.Fprintf(&b, `"k%08d":0`, i)
+	}
+	b.WriteByte('}')
+
+	start := time.Now()
+	_, err := Transform(b.Bytes())
+	elapsed := time.Since(start)
+
+	r.NoError(err, errorOccurred("transforming a large object with pre-sorted keys", err))
+	// The old O(n^2) implementation took roughly 7.5s for 40,000 keys, and
+	// would take well over 10s for 50,000. An O(n log n) sort completes in a
+	// small fraction of a second even on slow, shared CI hardware, so this
+	// bound leaves generous headroom for the correct implementation while
+	// still catching a return to quadratic behavior.
+	r.Less(elapsed, 5*time.Second, "sorting %d pre-sorted object keys took %v, which suggests a return to quadratic behavior", keyCount, elapsed)
 }
