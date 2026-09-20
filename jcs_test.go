@@ -8,6 +8,7 @@ package jcs
 
 import (
 	"bytes"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -253,6 +254,12 @@ func TestTransformRejectsInvalidSurrogatePairs(t *testing.T) {
 		{desc: "LowThenLow", input: `["\uDC00\uDC00"]`},
 		{desc: "LowThenHigh", input: `["\uDC00\uD800"]`},
 		{desc: "ArbitraryLowThenLow", input: `["\uDEAD\uDEAD"]`},
+		// The two halves of a valid pair (😀, the grinning-face
+		// emoji), given in reversed order. Before the high/low range check
+		// was added, this collided with the array holding a literal U+FFFD
+		// character, since both canonicalized to the same replacement-
+		// character bytes.
+		{desc: "ReversedValidPairHalves", input: `["\uDE00\uD83D"]`},
 	}
 
 	for _, tC := range testCases {
@@ -397,4 +404,49 @@ func TestTransformObjectSortIsNotQuadratic(t *testing.T) {
 	// bound leaves generous headroom for the correct implementation while
 	// still catching a return to quadratic behavior.
 	r.Less(elapsed, 5*time.Second, "sorting %d pre-sorted object keys took %v, which suggests a return to quadratic behavior", keyCount, elapsed)
+}
+
+// TestTransformRejectsInvalidUTF8InString guards against a regression where
+// parseQuotedString copied any byte that was not a quote, backslash, or
+// ASCII control character straight into the output, including bytes such as
+// 0xFF that are not valid at any position in UTF-8. RFC 8785 §3.2.4 defines
+// the canonical output as UTF-8 encoded text, so input that is not
+// well-formed UTF-8 must be rejected rather than passed through, which would
+// otherwise leave the "canonical" output itself not valid UTF-8.
+func TestTransformRejectsInvalidUTF8InString(t *testing.T) {
+	testCases := []struct {
+		desc string
+		// input is given as hex so that the invalid byte sequence can be
+		// expressed exactly, independent of how Go source would interpret it.
+		inputHex string
+	}{
+		// ["<0xFF>"]: 0xFF is not a valid UTF-8 byte at any position.
+		{desc: "LoneInvalidByte", inputHex: "5b22ff225d"},
+		// ["<0xC0><0x80>"]: an overlong two-byte encoding of NUL.
+		{desc: "OverlongEncoding", inputHex: "5b22c080225d"},
+		// ["<0xED><0xA0><0x80>"]: a CESU-8/WTF-8 style encoding of the
+		// surrogate code point U+D800, which RFC 3629 explicitly excludes
+		// from valid UTF-8.
+		{desc: "SurrogateEncodedAsUTF8", inputHex: "5b22eda080225d"},
+	}
+
+	for _, tC := range testCases {
+		tC := tC
+		t.Run(tC.desc, func(t *testing.T) {
+			t.Parallel()
+			r := require.New(t)
+
+			input, err := hex.DecodeString(tC.inputHex)
+			r.NoError(err, "test fixture hex should decode cleanly")
+
+			_, err = Transform(input)
+			r.Error(err, "Transform should reject a string containing a byte sequence that is not valid UTF-8")
+		})
+	}
+
+	// A genuine multi-byte UTF-8 character must still pass through unchanged.
+	r := require.New(t)
+	transformed, err := Transform([]byte("[\"caf\xc3\xa9\"]"))
+	r.NoError(err, errorOccurred("transforming a string containing valid multi-byte UTF-8", err))
+	r.Equal("[\"caf\xc3\xa9\"]", string(transformed))
 }

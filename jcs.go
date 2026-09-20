@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf16"
+	"unicode/utf8"
 )
 
 type nameValueType struct {
@@ -279,13 +280,26 @@ CoreLoop:
 				}
 				return "", fmt.Errorf("Unexpected escape: \\%s", string(c))
 			}
-		} else {
-			// Just an ordinary ASCII character alternatively a UTF-8 byte
-			// outside of ASCII.
+		} else if c < 0x80 {
+			// An ordinary ASCII character.
 			// Note that properly formatted UTF-8 never clashes with ASCII
 			// making byte per byte search for ASCII break characters work
 			// as expected.
 			rawString.WriteByte(c)
+		} else {
+			// The lead byte of a multi-byte UTF-8 sequence. RFC 8785 §3.2.4
+			// requires the canonical output to be valid UTF-8, so the
+			// sequence starting here is decoded and validated rather than
+			// copied through byte for byte: a byte such as 0xFF is not
+			// valid at any position in UTF-8 and must be rejected, not
+			// passed along into the output unchanged.
+			j.index--
+			r, size := utf8.DecodeRune(j.jsonData[j.index:])
+			if r == utf8.RuneError && size <= 1 {
+				return "", fmt.Errorf("Invalid UTF-8 sequence at byte 0x%02x", c)
+			}
+			rawString.Write(j.jsonData[j.index : j.index+size])
+			j.index += size
 		}
 	}
 
