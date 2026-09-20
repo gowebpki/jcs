@@ -47,6 +47,17 @@ var (
 // JSON literals
 var literals = []string{"true", "false", "null"}
 
+// UTF-16 surrogate ranges, used to validate \u escape pairs. A valid
+// surrogate pair is a high surrogate (the first code unit) followed by a low
+// surrogate (the second code unit); any other pairing is ill-formed and must
+// be rejected rather than silently decoded to U+FFFD.
+const (
+	highSurrogateMin = 0xD800
+	highSurrogateMax = 0xDBFF
+	lowSurrogateMin  = 0xDC00
+	lowSurrogateMax  = 0xDFFF
+)
+
 // Transform converts raw JSON data from a []byte array into a canonicalized version according RFC 8785
 func Transform(jsonData []byte) ([]byte, error) {
 	if jsonData == nil {
@@ -214,6 +225,13 @@ CoreLoop:
 				}
 
 				if utf16.IsSurrogate(firstUTF16) {
+					// Only a high surrogate may begin a pair. A lone low
+					// surrogate here is ill-formed and RFC 8785 requires
+					// that it be rejected rather than decoded.
+					if firstUTF16 < highSurrogateMin || firstUTF16 > highSurrogateMax {
+						return "", fmt.Errorf("Invalid high surrogate: \\u%04x", firstUTF16)
+					}
+
 					// If the first UTF-16 code unit has a certain value there must be
 					// another succeeding UTF-16 code unit as well
 					backslash, err := j.nextChar()
@@ -233,6 +251,13 @@ CoreLoop:
 					uEscape, err := j.getUEscape()
 					if err != nil {
 						return "", err
+					}
+
+					// The second code unit must be a low surrogate. Any other
+					// value is an invalid pairing that utf16.DecodeRune would
+					// otherwise silently turn into U+FFFD.
+					if uEscape < lowSurrogateMin || uEscape > lowSurrogateMax {
+						return "", fmt.Errorf("Invalid low surrogate: \\u%04x", uEscape)
 					}
 					rawString.WriteRune(utf16.DecodeRune(firstUTF16, uEscape))
 

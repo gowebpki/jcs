@@ -232,3 +232,42 @@ func TestTransformRejectsMalformedObjectKey(t *testing.T) {
 		})
 	}
 }
+
+// TestTransformRejectsInvalidSurrogatePairs guards against a regression
+// where a \u escape naming a lone or mis-ordered UTF-16 surrogate was passed
+// straight to utf16.DecodeRune without validating that the first code unit
+// is a high surrogate and the second is a low surrogate. DecodeRune returns
+// the Unicode replacement character (U+FFFD) for any invalid pairing rather
+// than signaling an error, so distinct ill-formed inputs such as
+// "\uD800\uD800", "\uDC00\uDC00", and "\uDC00\uD800" all canonicalized to
+// the identical byte sequence with a nil error, violating both RFC 8785's
+// requirement that invalid surrogates cause an error and the injectivity
+// that a canonicalizer must preserve.
+func TestTransformRejectsInvalidSurrogatePairs(t *testing.T) {
+	testCases := []struct {
+		desc  string
+		input string
+	}{
+		{desc: "HighThenHigh", input: `["\uD800\uD800"]`},
+		{desc: "LowThenLow", input: `["\uDC00\uDC00"]`},
+		{desc: "LowThenHigh", input: `["\uDC00\uD800"]`},
+		{desc: "ArbitraryLowThenLow", input: `["\uDEAD\uDEAD"]`},
+	}
+
+	for _, tC := range testCases {
+		tC := tC
+		t.Run(tC.desc, func(t *testing.T) {
+			t.Parallel()
+			r := require.New(t)
+
+			_, err := Transform([]byte(tC.input))
+			r.Error(err, "Transform should reject an invalid or mis-ordered surrogate pair instead of silently emitting U+FFFD")
+		})
+	}
+
+	// A valid, correctly ordered surrogate pair must still decode normally.
+	r := require.New(t)
+	transformed, err := Transform([]byte(`["😀"]`))
+	r.NoError(err, errorOccurred("transforming a valid high+low surrogate pair", err))
+	r.Equal("[\"\U0001F600\"]", string(transformed), "a valid surrogate pair should decode to the corresponding rune")
+}
