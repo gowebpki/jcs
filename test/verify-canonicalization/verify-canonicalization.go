@@ -22,7 +22,7 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"path/filepath"
 	"runtime"
 
@@ -40,9 +40,32 @@ var testdata string
 var failures = 0
 
 func read(fileName string, directory string) []byte {
-	data, err := ioutil.ReadFile(filepath.Join(filepath.Join(testdata, directory), fileName))
+	data, err := os.ReadFile(filepath.Join(filepath.Join(testdata, directory), fileName))
 	check(err)
 	return data
+}
+
+/*
+locateTestData - Work out where the canonicalization test vectors live.
+
+An explicit command line argument wins. Otherwise the directory is derived
+from this source file's compile time path, which is correct when the tool is
+run from a checkout with "go run ./test/verify-canonicalization". That
+derivation cannot work for an installed binary, or for one built with
+-trimpath, because the recorded path is then either another machine's
+directory or a module relative path such as
+"github.com/gowebpki/jcs/test/verify-canonicalization". Passing the directory
+as an argument is the supported way to run those.
+*/
+func locateTestData() string {
+	if len(os.Args) > 1 {
+		return os.Args[1]
+	}
+
+	// thisFile is <repository>/test/verify-canonicalization/verify-canonicalization.go,
+	// so three parent steps reach the repository root, where testdata lives.
+	_, thisFile, _, _ := runtime.Caller(0)
+	return filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(thisFile))), "testdata")
 }
 
 func verify(fileName string) {
@@ -74,17 +97,18 @@ func verify(fileName string) {
 }
 
 func main() {
-	_, executable, _, _ := runtime.Caller(0)
-	testdata = filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(executable))), "jcs/testdata")
+	testdata = locateTestData()
 	fmt.Println(testdata)
-	files, err := ioutil.ReadDir(filepath.Join(testdata, "input"))
+	files, err := os.ReadDir(filepath.Join(testdata, "input"))
 	check(err)
 	for _, file := range files {
 		verify(file.Name())
 	}
 	if failures == 0 {
 		fmt.Println("All tests succeeded!")
-	} else {
-		fmt.Printf("\n****** ERRORS: %d *******\n", failures)
+		return
 	}
+	// Exit non zero so that the tool can be used from a script or a CI job.
+	fmt.Printf("\n****** ERRORS: %d *******\n", failures)
+	os.Exit(1)
 }

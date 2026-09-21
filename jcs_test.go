@@ -1,4 +1,4 @@
-// Copyright 2021 Bret Jordan & Benedikt Thoma, All rights reserved.
+// Copyright 2021-2026 Bret Jordan & Benedikt Thoma, All rights reserved.
 // Copyright 2006-2019 WebPKI.org (http://webpki.org).
 //
 // Use of this source code is governed by an Apache 2.0 license that can be
@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -406,6 +408,58 @@ func TestTransformObjectSortIsNotQuadratic(t *testing.T) {
 	r.Less(elapsed, 5*time.Second, "sorting %d pre-sorted object keys took %v, which suggests a return to quadratic behavior", keyCount, elapsed)
 }
 
+// TestTransformNestingIsNotQuadratic guards against a regression of the
+// nesting amplification, where each parse function returned the finished text
+// of its own subtree and every enclosing level copied that text into a buffer
+// of its own. Total work was then the sum of every subtree size over every
+// nesting level, O(n * depth) rather than O(n), which let a small deeply
+// nested document allocate gigabytes: a 120 KB payload allocated 1,143 MB and
+// a 920 KB payload allocated over nine gigabytes, several seconds of CPU
+// apiece. Parsing into a tree and serializing it in one pass writes every
+// byte of the output exactly once, which brings the same 120 KB payload down
+// to roughly 2 MB.
+//
+// The assertion is on bytes allocated rather than on elapsed time, because
+// allocation is far more stable than wall clock time on shared CI hardware.
+// The bound leaves more than an order of magnitude of headroom in both
+// directions.
+func TestTransformNestingIsNotQuadratic(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping allocation regression test in -short mode")
+	}
+	r := require.New(t)
+
+	const (
+		depth          = maxNestingDepth - 1
+		leafBytes      = 100000
+		maxAllocatedMB = 100
+	)
+
+	payload := make([]byte, 0, depth*2+leafBytes+2)
+	for i := 0; i < depth; i++ {
+		payload = append(payload, '[')
+	}
+	payload = append(payload, '"')
+	payload = append(payload, bytes.Repeat([]byte("A"), leafBytes)...)
+	payload = append(payload, '"')
+	for i := 0; i < depth; i++ {
+		payload = append(payload, ']')
+	}
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_, err := Transform(payload)
+	runtime.ReadMemStats(&after)
+
+	r.NoError(err, errorOccurred("transforming a deeply nested payload", err))
+
+	allocatedMB := float64(after.TotalAlloc-before.TotalAlloc) / (1 << 20)
+	r.Less(allocatedMB, float64(maxAllocatedMB),
+		"canonicalizing a %d byte payload nested %d deep allocated %.1f MB, which suggests the output is being rebuilt at every nesting level again",
+		len(payload), depth, allocatedMB)
+}
+
 // TestTransformRejectsInvalidUTF8InString guards against a regression where
 // parseQuotedString copied any byte that was not a quote, backslash, or
 // ASCII control character straight into the output, including bytes such as
@@ -449,4 +503,101 @@ func TestTransformRejectsInvalidUTF8InString(t *testing.T) {
 	transformed, err := Transform([]byte("[\"caf\xc3\xa9\"]"))
 	r.NoError(err, errorOccurred("transforming a string containing valid multi-byte UTF-8", err))
 	r.Equal("[\"caf\xc3\xa9\"]", string(transformed))
+}
+
+// TestTransformAcceptsWhitespaceAroundTopLevelScalar guards against a
+// regression where parseEntry handed the entire input buffer to parseLiteral
+// for a top level literal or number, which made any surrounding
+// insignificant whitespace part of the token itself. Documents as ordinary
+// as "true\n", the output of almost any text editor or file writer, were
+// rejected even though RFC 8259 permits whitespace around the top level
+// value. Whitespace around a top level object, array, or string was already
+// handled correctly, so only bare scalars were affected.
+func TestTransformAcceptsWhitespaceAroundTopLevelScalar(t *testing.T) {
+	accepted := []struct {
+		desc     string
+		input    string
+		expected string
+	}{
+		{desc: "TrailingNewline", input: "true\n", expected: "true"},
+		{desc: "LeadingSpace", input: " true", expected: "true"},
+		{desc: "TrailingSpace", input: "true ", expected: "true"},
+		{desc: "NumberTrailingNewline", input: "42\n", expected: "42"},
+		{desc: "NumberLeadingSpace", input: " 42", expected: "42"},
+		{desc: "NullTrailingTab", input: "null\t", expected: "null"},
+		{desc: "CarriageReturnAndNewline", input: "1.5e-7\r\n", expected: "1.5e-7"},
+		{desc: "SurroundedByMixedWhitespace", input: "  \t\r\n false \t\r\n ", expected: "false"},
+		{desc: "NoWhitespaceAtAll", input: "true", expected: "true"},
+	}
+
+	for _, tC := range accepted {
+		tC := tC
+		t.Run(tC.desc, func(t *testing.T) {
+			t.Parallel()
+			r := require.New(t)
+
+			transformed, err := Transform([]byte(tC.input))
+			r.NoError(err, errorOccurred(fmt.Sprintf("transforming %q", tC.input), err))
+			r.Equal(tC.expected, string(transformed))
+		})
+	}
+
+	// Accepting surrounding whitespace must not weaken rejection of a
+	// document that carries anything else beside the top level value.
+	rejected := []struct {
+		desc  string
+		input string
+	}{
+		{desc: "TwoValues", input: "true false"},
+		{desc: "LiteralWithSuffix", input: "truex"},
+		{desc: "NumberWithSuffix", input: "42abc"},
+		{desc: "ValueThenJunk", input: "1 x"},
+		{desc: "ArrayThenJunk", input: "[1] x"},
+		{desc: "UnclosedArray", input: "[1"},
+		{desc: "UnclosedObject", input: `{"a":1`},
+		{desc: "UnclosedNestedArray", input: "[[1]"},
+		{desc: "BareMinus", input: "-"},
+		{desc: "BareDot", input: "."},
+		{desc: "WhitespaceOnly", input: " \t\n"},
+	}
+
+	for _, tC := range rejected {
+		tC := tC
+		t.Run(tC.desc, func(t *testing.T) {
+			t.Parallel()
+			r := require.New(t)
+
+			_, err := Transform([]byte(tC.input))
+			r.Error(err, "Transform should still reject %q", tC.input)
+		})
+	}
+}
+
+// TestErrorMessagesAreBoundedAndQuoted checks that fragments of the input
+// document copied into an error message are both length bounded and quoted.
+// Error strings from a canonicalizer running on untrusted input are
+// routinely written to logs, so an unbounded fragment lets one request write
+// megabytes of attacker chosen data to a log, and an unquoted fragment lets
+// that data carry newlines or terminal escape sequences into it.
+func TestErrorMessagesAreBoundedAndQuoted(t *testing.T) {
+	r := require.New(t)
+
+	// A two megabyte malformed token must not produce a two megabyte error.
+	_, err := Transform([]byte("[1." + strings.Repeat("9", 2000000) + ".5]"))
+	r.Error(err)
+	r.Less(len(err.Error()), 256, "error message should stay bounded, got %d bytes", len(err.Error()))
+
+	// The same holds for a syntactically valid but out of range number,
+	// whose error would otherwise come straight from strconv and embed the
+	// whole token.
+	_, err = Transform([]byte("[" + strings.Repeat("9", 500000) + "e999]"))
+	r.Error(err)
+	r.Less(len(err.Error()), 256, "error message should stay bounded, got %d bytes", len(err.Error()))
+
+	// A key carrying a newline and a terminal escape sequence must not reach
+	// an error string unescaped.
+	_, err = Transform([]byte(`{"a\u000aforged log line\u001b[31m":1,"a\u000aforged log line\u001b[31m":2}`))
+	r.Error(err)
+	r.NotContains(err.Error(), "\n", "a raw newline must not be copied into an error message")
+	r.NotContains(err.Error(), "\x1b", "a raw escape character must not be copied into an error message")
 }

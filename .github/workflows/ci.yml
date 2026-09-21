@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: true
+
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run tests with coverage
+        run: go test -coverprofile=coverage.txt ./...
+
+      - name: Run race detector
+        run: go test -race ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.txt
+          fail_ci_if_error: true
+
+  fuzz:
+    name: Fuzz
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: true
+
+      # Transform parses untrusted input, so the committed seed corpus is
+      # replayed on every run and a short fuzzing burst looks for anything
+      # new. The burst is deliberately brief to keep pull requests fast. The
+      # nightly workflow does the longer search. A failure writes the input
+      # that caused it to testdata/fuzz, and prints it in the job log.
+      - name: Fuzz the canonicalizer
+        run: go test -run FuzzTransform -fuzz FuzzTransform -fuzztime 60s
+
+  vulncheck:
+    name: Vulnerability scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: true
+
+      - name: Run govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...

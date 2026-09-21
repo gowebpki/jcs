@@ -36,9 +36,6 @@ func check(e error) {
 	}
 }
 
-// Change the file name to suit your environment
-const testFile = "c:\\es6\\numbers\\es6testfile100m.txt"
-
 const invalidNumber = "null"
 
 var conversionErrors int = 0
@@ -83,6 +80,18 @@ func main() {
 	verify("7ff0000000000000", invalidNumber)
 	verify("fff0000000000000", invalidNumber)
 
+	// The 100 million value suite is a large separate download rather than
+	// part of this repository, so it is optional. Pass its path as an
+	// argument to run it. Without one, the discrete checks above are still
+	// a meaningful smoke test of the number serializer.
+	if len(os.Args) < 2 {
+		fmt.Println("Discrete value checks passed.")
+		fmt.Println("To also run the 100 million value suite, pass the path to es6testfile100m.txt as an argument:")
+		fmt.Println("    go run ./test/verify-numbers /path/to/es6testfile100m.txt")
+		return
+	}
+
+	testFile := os.Args[1]
 	file, err := os.Open(testFile)
 	check(err)
 	defer file.Close()
@@ -103,7 +112,9 @@ func main() {
 	check(scanner.Err())
 	if conversionErrors == 0 {
 		fmt.Printf("\nSuccessful Operation. Lines read: %d\n", lineCount)
-	} else {
-		fmt.Printf("\n****** ERRORS: %d *******\n", conversionErrors)
+		return
 	}
+	// Exit non zero so that the tool can be used from a script or a CI job.
+	fmt.Printf("\n****** ERRORS: %d *******\n", conversionErrors)
+	os.Exit(1)
 }

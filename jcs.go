@@ -1,4 +1,4 @@
-// Copyright 2021 Bret Jordan & Benedikt Thoma, All rights reserved.
+// Copyright 2021-2026 Bret Jordan & Benedikt Thoma, All rights reserved.
 // Copyright 2006-2019 WebPKI.org (http://webpki.org).
 //
 // Use of this source code is governed by an Apache 2.0 license that can be
@@ -8,6 +8,7 @@
 package jcs
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"regexp"
@@ -18,10 +19,95 @@ import (
 	"unicode/utf8"
 )
 
+// nodeKind identifies which of the node fields carries the parsed value.
+type nodeKind uint8
+
+const (
+	// nodeScalar is a literal, a number, or a string, held as the finished
+	// canonical text of that value.
+	nodeScalar nodeKind = iota
+	// nodeArray is an array, held as its elements in document order.
+	nodeArray
+	// nodeObject is an object, held as its members already sorted.
+	nodeObject
+)
+
+/*
+node - One parsed JSON value.
+
+Parsing and serialization are deliberately separate passes. Parsing builds a
+tree of these nodes, and a single serialization pass then writes the whole
+tree into one output buffer.
+
+An earlier design had each parse function return the finished text of its own
+subtree, which every enclosing level then copied into a buffer of its own.
+That made the total work the sum of every subtree size over every nesting
+level, which is O(n * depth) rather than O(n), and it gave an attacker an
+amplification factor bounded only by the nesting limit: a 920 KB document
+nested to the limit allocated over nine gigabytes and burned several seconds
+of CPU. Writing each byte of the output exactly once removes that term
+entirely.
+*/
+type node struct {
+	kind     nodeKind
+	text     string          // nodeScalar
+	elements []node          // nodeArray
+	members  []nameValueType // nodeObject
+}
+
+/*
+appendElement and appendMember - Grow a large collection of parsed children by
+doubling rather than by the runtime's default policy.
+
+The runtime doubles a slice's capacity while it is small, and then, past a few
+hundred elements, switches to growing it by roughly a quarter at a time.
+Filling a large slice by repeated append therefore allocates about five times
+the size of the finished slice. The number of children in an array or an
+object is chosen by whoever supplies the document, which makes that overhead
+attacker controlled: a flat array of 400,000 elements allocated 178 MB where
+the finished slice needs 29 MB.
+
+Doubling is taken over only once the slice is already large, because below
+that point the runtime is doing the same thing and doing it without the
+over allocation that a fixed starting capacity would impose on the small
+containers that make up most real documents.
+
+These are two nearly identical functions rather than one generic function on
+purpose, so that the package keeps building on Go releases older than 1.18.
+*/
+const growthTakeoverCapacity = 256
+
+func appendElement(elements []node, element node) []node {
+	if len(elements) == cap(elements) && cap(elements) >= growthTakeoverCapacity {
+		grown := make([]node, len(elements), cap(elements)*2)
+		copy(grown, elements)
+		elements = grown
+	}
+	return append(elements, element)
+}
+
+func appendMember(members []nameValueType, member nameValueType) []nameValueType {
+	if len(members) == cap(members) && cap(members) >= growthTakeoverCapacity {
+		grown := make([]nameValueType, len(members), cap(members)*2)
+		copy(grown, members)
+		members = grown
+	}
+	return append(members, member)
+}
+
+/*
+nameValueType - One member of a JSON object.
+
+value is held behind a pointer deliberately. Sorting moves these structs
+around, and sort.Slice swaps them through a reflect based swapper that copies
+the whole struct each time, so an object with many members is sensitive to how
+wide this struct is. A pointer keeps it narrower than an inline node would,
+which matters because the number of members in an object is attacker chosen.
+*/
 type nameValueType struct {
 	name    string
 	sortKey []uint16
-	value   string
+	value   *node
 }
 
 type jcsData struct {
@@ -49,6 +135,27 @@ var (
 // JSON literals
 var literals = []string{"true", "false", "null"}
 
+// maxErrorTokenLength bounds how much of the input document may be copied
+// into an error message.
+const maxErrorTokenLength = 32
+
+// forError renders a fragment of the input document for inclusion in an
+// error message. It quotes the fragment and truncates it to
+// maxErrorTokenLength bytes. Both matter for a canonicalizer that runs on
+// untrusted input: error strings are routinely written to logs, so an
+// unbounded fragment would let a single request write megabytes of attacker
+// chosen data to a log, an unquoted fragment would let that data carry
+// newlines or terminal escape sequences into the log, and either way the
+// content of a document being signed should not be copied wholesale into
+// places the document itself was never meant to reach.
+func forError(value string) string {
+	if len(value) > maxErrorTokenLength {
+		return fmt.Sprintf("%q (truncated from %d bytes)",
+			value[:maxErrorTokenLength], len(value))
+	}
+	return fmt.Sprintf("%q", value)
+}
+
 // UTF-16 surrogate ranges, used to validate \u escape pairs. A valid
 // surrogate pair is a high surrogate (the first code unit) followed by a low
 // surrogate (the second code unit); any other pairing is ill-formed and must
@@ -71,7 +178,7 @@ func Transform(jsonData []byte) ([]byte, error) {
 	jd.jsonData = jsonData
 	j := &jd
 
-	transformed, err := j.parseEntry()
+	root, err := j.parseEntry()
 	if err != nil {
 		return nil, err
 	}
@@ -82,7 +189,52 @@ func Transform(jsonData []byte) ([]byte, error) {
 		}
 		j.index++
 	}
-	return []byte(transformed), err
+
+	// Serialize the parsed tree in a single pass into one buffer, so that
+	// every byte of the canonical output is written exactly once. The input
+	// length is only a starting hint: canonical output is usually smaller
+	// than its input, because insignificant whitespace is dropped, but a
+	// number such as 1e20 does expand on the way out.
+	var canonical bytes.Buffer
+	canonical.Grow(len(jsonData))
+	j.writeNode(&canonical, root)
+	return canonical.Bytes(), nil
+}
+
+/*
+writeNode - Append the canonical text of one node, and of everything below
+it, to out.
+
+Recursion here is bounded by the same maxNestingDepth that bounded parsing,
+because the tree cannot be deeper than the input that produced it.
+*/
+func (j *jcsData) writeNode(out *bytes.Buffer, n node) {
+	switch n.kind {
+	case nodeArray:
+		out.WriteByte('[')
+		for i := range n.elements {
+			if i > 0 {
+				out.WriteByte(',')
+			}
+			j.writeNode(out, n.elements[i])
+		}
+		out.WriteByte(']')
+
+	case nodeObject:
+		out.WriteByte('{')
+		for i := range n.members {
+			if i > 0 {
+				out.WriteByte(',')
+			}
+			out.WriteString(j.decorateString(n.members[i].name))
+			out.WriteByte(':')
+			j.writeNode(out, *n.members[i].value)
+		}
+		out.WriteByte('}')
+
+	default:
+		out.WriteString(n.text)
+	}
 }
 
 func (j *jcsData) isWhiteSpace(c byte) bool {
@@ -123,7 +275,7 @@ func (j *jcsData) scanFor(expected byte) error {
 		return err
 	}
 	if c != expected {
-		return fmt.Errorf("Expected %s but got %s", string(expected), string(c))
+		return fmt.Errorf("Expected %q but got %q", rune(expected), rune(c))
 	}
 	return nil
 }
@@ -172,25 +324,21 @@ CoreLoop:
 }
 
 // parseEntry is the entrypoint into the parsing control flow
-func (j *jcsData) parseEntry() (string, error) {
-	c, err := j.scan()
+func (j *jcsData) parseEntry() (node, error) {
+	_, err := j.scan()
 	if err != nil {
-		return "", err
+		return node{}, err
 	}
 	j.index--
 
-	switch c {
-	case '{', '"', '[':
-		return j.parseElement()
-	default:
-		value, err := parseLiteral(string(j.jsonData))
-		if err != nil {
-			return "", err
-		}
-
-		j.index = len(j.jsonData)
-		return value, nil
-	}
+	// Every top level value, a bare literal or number included, is parsed by
+	// the ordinary element parser. Handing the entire buffer to parseLiteral
+	// instead, as this function used to, made any insignificant whitespace
+	// around a top level scalar part of the token itself, so that ordinary
+	// documents such as "true\n" or " 42" were rejected even though RFC 8259
+	// permits whitespace around the top level value. Transform checks for
+	// trailing content once the value has been parsed.
+	return j.parseElement()
 }
 
 func (j *jcsData) parseQuotedString() (string, error) {
@@ -278,7 +426,7 @@ CoreLoop:
 						continue CoreLoop
 					}
 				}
-				return "", fmt.Errorf("Unexpected escape: \\%s", string(c))
+				return "", fmt.Errorf("Unexpected escape: %q", string([]byte{'\\', c}))
 			}
 		} else if c < 0x80 {
 			// An ordinary ASCII character.
@@ -306,18 +454,23 @@ CoreLoop:
 	return rawString.String(), nil
 }
 
-func (j *jcsData) parseSimpleType() (string, error) {
+func (j *jcsData) parseSimpleType() (node, error) {
 	var token strings.Builder
 
 	j.index--
 
-	// no condition is needed here.
-	// if the buffer reaches EOF nextChar returns an error, or we terminate because the
-	// json simple type terminates
 	for {
+		// End of input terminates a top level literal or number that is not
+		// followed by any structural character, such as the whole document
+		// "42". An unterminated array or object is still rejected, because
+		// the caller goes on to fail on the missing ']' or '}'.
+		if j.index >= len(j.jsonData) {
+			break
+		}
+
 		c, err := j.nextChar()
 		if err != nil {
-			return "", err
+			return node{}, err
 		}
 
 		// A literal or number is terminated by a structural character or by
@@ -335,10 +488,15 @@ func (j *jcsData) parseSimpleType() (string, error) {
 	}
 
 	if token.Len() == 0 {
-		return "", errors.New("Missing argument")
+		return node{}, errors.New("Missing argument")
 	}
 
-	return parseLiteral(token.String())
+	text, err := parseLiteral(token.String())
+	if err != nil {
+		return node{}, err
+	}
+
+	return node{kind: nodeScalar, text: text}, nil
 }
 
 // numberPattern is the RFC 8259 §6 number grammar:
@@ -366,12 +524,16 @@ func parseLiteral(value string) (string, error) {
 	// Reject anything that is not a well-formed JSON number (and is not one
 	// of the known literals either) before consulting strconv.ParseFloat.
 	if !numberPattern.MatchString(value) {
-		return "", fmt.Errorf("Invalid literal or number: %s", value)
+		return "", fmt.Errorf("Invalid literal or number: %s", forError(value))
 	}
 
 	ieeeF64, err := strconv.ParseFloat(value, 64)
 	if err != nil {
-		return "", err
+		// The error strconv returns embeds the entire token, so it is
+		// replaced here with a bounded message. A syntactically valid JSON
+		// number may be arbitrarily long, and only a value out of range for
+		// an IEEE 754 double can reach this point.
+		return "", fmt.Errorf("Number out of range: %s", forError(value))
 	}
 
 	value, err = NumberToJSON(ieeeF64)
@@ -382,10 +544,10 @@ func parseLiteral(value string) (string, error) {
 	return value, nil
 }
 
-func (j *jcsData) parseElement() (string, error) {
+func (j *jcsData) parseElement() (node, error) {
 	c, err := j.scan()
 	if err != nil {
-		return "", err
+		return node{}, err
 	}
 
 	switch c {
@@ -394,9 +556,9 @@ func (j *jcsData) parseElement() (string, error) {
 	case '"':
 		str, err := j.parseQuotedString()
 		if err != nil {
-			return "", err
+			return node{}, err
 		}
-		return j.decorateString(str), nil
+		return node{kind: nodeScalar, text: j.decorateString(str)}, nil
 	case '[':
 		return j.parseArray()
 	default:
@@ -414,22 +576,22 @@ func (j *jcsData) peek() (byte, error) {
 	return c, nil
 }
 
-func (j *jcsData) parseArray() (string, error) {
+func (j *jcsData) parseArray() (node, error) {
 	j.depth++
 	defer func() { j.depth-- }()
 	if j.depth > maxNestingDepth {
-		return "", fmt.Errorf("Maximum nesting depth of %d exceeded", maxNestingDepth)
+		return node{}, fmt.Errorf("Maximum nesting depth of %d exceeded", maxNestingDepth)
 	}
 
-	var arrayData strings.Builder
+	// Element order in an array is significant and is never changed, so the
+	// elements are simply collected in document order.
+	elements := []node{}
 	var next bool
-
-	arrayData.WriteByte('[')
 
 	for {
 		c, err := j.peek()
 		if err != nil {
-			return "", err
+			return node{}, err
 		}
 
 		if c == ']' {
@@ -440,22 +602,20 @@ func (j *jcsData) parseArray() (string, error) {
 		if next {
 			err = j.scanFor(',')
 			if err != nil {
-				return "", err
+				return node{}, err
 			}
-			arrayData.WriteByte(',')
 		} else {
 			next = true
 		}
 
 		element, err := j.parseElement()
 		if err != nil {
-			return "", err
+			return node{}, err
 		}
-		arrayData.WriteString(element)
+		elements = appendElement(elements, element)
 	}
 
-	arrayData.WriteByte(']')
-	return arrayData.String(), nil
+	return node{kind: nodeArray, elements: elements}, nil
 }
 
 // compareSortKeys lexicographically compares two UTF-16 sort keys, returning
@@ -481,19 +641,19 @@ func compareSortKeys(a, b []uint16) int {
 	return len(a) - len(b)
 }
 
-func (j *jcsData) parseObject() (string, error) {
+func (j *jcsData) parseObject() (node, error) {
 	j.depth++
 	defer func() { j.depth-- }()
 	if j.depth > maxNestingDepth {
-		return "", fmt.Errorf("Maximum nesting depth of %d exceeded", maxNestingDepth)
+		return node{}, fmt.Errorf("Maximum nesting depth of %d exceeded", maxNestingDepth)
 	}
 
-	var nameValues []nameValueType
+	nameValues := []nameValueType{}
 	var next bool = false
 	for {
 		c, err := j.peek()
 		if err != nil {
-			return "", err
+			return node{}, err
 		}
 
 		if c == '}' {
@@ -505,18 +665,18 @@ func (j *jcsData) parseObject() (string, error) {
 		if next {
 			err = j.scanFor(',')
 			if err != nil {
-				return "", err
+				return node{}, err
 			}
 		}
 		next = true
 
 		err = j.scanFor('"')
 		if err != nil {
-			return "", err
+			return node{}, err
 		}
 		rawUTF8, err := j.parseQuotedString()
 		if err != nil {
-			return "", err
+			return node{}, err
 		}
 		// Sort keys on UTF-16 code units
 		// Since UTF-8 doesn't have endianess this is just a value transformation
@@ -524,14 +684,15 @@ func (j *jcsData) parseObject() (string, error) {
 		sortKey := utf16.Encode([]rune(rawUTF8))
 		err = j.scanFor(':')
 		if err != nil {
-			return "", err
+			return node{}, err
 		}
 
 		element, err := j.parseElement()
 		if err != nil {
-			return "", err
+			return node{}, err
 		}
-		nameValues = append(nameValues, nameValueType{rawUTF8, sortKey, element})
+		value := element
+		nameValues = appendMember(nameValues, nameValueType{rawUTF8, sortKey, &value})
 	}
 
 	// Sort all members once, in O(n log n), rather than maintaining sorted
@@ -544,23 +705,11 @@ func (j *jcsData) parseObject() (string, error) {
 	// the now-sorted members is enough to detect it.
 	for i := 1; i < len(nameValues); i++ {
 		if compareSortKeys(nameValues[i-1].sortKey, nameValues[i].sortKey) == 0 {
-			return "", fmt.Errorf("Duplicate key: %s", nameValues[i].name)
+			return node{}, fmt.Errorf("Duplicate key: %s", forError(nameValues[i].name))
 		}
 	}
 
-	// Now everything is sorted so we can properly serialize the object
-	var objectData strings.Builder
-	objectData.WriteByte('{')
-	next = false
-	for _, nameValue := range nameValues {
-		if next {
-			objectData.WriteByte(',')
-		}
-		next = true
-		objectData.WriteString(j.decorateString(nameValue.name))
-		objectData.WriteByte(':')
-		objectData.WriteString(nameValue.value)
-	}
-	objectData.WriteByte('}')
-	return objectData.String(), nil
+	// The members are sorted here, at parse time, but they are not written
+	// out here. Serialization of the whole tree happens in one later pass.
+	return node{kind: nodeObject, members: nameValues}, nil
 }

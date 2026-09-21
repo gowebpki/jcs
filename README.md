@@ -2,10 +2,7 @@
 
 # JSON Canonicalization
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/gowebpki/jcs)](https://goreportcard.com/report/github.com/gowebpki/jcs) 
-[![godoc](https://img.shields.io/badge/godoc-reference-blue.svg?style=flat)](https://pkg.go.dev/github.com/gowebpki/jcs)
-[![GitHub license](https://img.shields.io/github/license/gowebpki/jcs.svg?style=flat)](https://github.com/gowebpki/jcs/blob/master/LICENSE)
-[![GitHub go.mod Go version of a Go module](https://img.shields.io/github/go-mod/go-version/gowebpki/jcs.svg?style=flat)](https://github.com/gowebpki/jcs)
+[![Go Reference](https://pkg.go.dev/badge/github.com/gowebpki/jcs.svg)](https://pkg.go.dev/github.com/gowebpki/jcs) [![CI](https://github.com/gowebpki/jcs/actions/workflows/ci.yml/badge.svg)](https://github.com/gowebpki/jcs/actions/workflows/ci.yml) [![codecov](https://codecov.io/gh/gowebpki/jcs/graph/badge.svg)](https://codecov.io/gh/gowebpki/jcs) [![Release](https://img.shields.io/github/v/release/gowebpki/jcs)](https://github.com/gowebpki/jcs/releases) [![Go Version](https://img.shields.io/github/go-mod/go-version/gowebpki/jcs)](https://github.com/gowebpki/jcs) [![License](https://img.shields.io/github/license/gowebpki/jcs)](https://github.com/gowebpki/jcs/blob/master/LICENSE)
 
 Cryptographic operations like hashing and signing depend on that the target 
 data does not change during serialization, transport, or parsing. 

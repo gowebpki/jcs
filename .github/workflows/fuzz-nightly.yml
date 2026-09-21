@@ -1,0 +1,34 @@
+name: Nightly Fuzz
+
+# Transform runs on attacker supplied bytes before a signature is verified, so
+# it gets a longer unattended fuzzing run than a pull request can afford. Any
+# input that fails is printed in the job log and can be added to
+# testdata/fuzz as a permanent regression case.
+
+on:
+  schedule:
+    # 07:00 UTC every day.
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Extended fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: true
+
+      - name: Fuzz the canonicalizer
+        run: go test -run FuzzTransform -fuzz FuzzTransform -fuzztime 30m
